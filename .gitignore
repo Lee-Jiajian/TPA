@@ -158,3 +158,21 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+# 忽略所有图片格式（核心规则）
+*.bmp
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.tiff
+*.webp
+
+# 针对你的项目，特别忽略results文件夹中的图片
+results/
+results_txt/
+
+# 也可以忽略权重文件（计算机视觉项目必备）
+*.pth
+*.pt
+*.ckpt
+*.onnx
