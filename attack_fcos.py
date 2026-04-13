@@ -30,8 +30,24 @@ from yolov4.eval_code.tool.darknet2pytorch import *
 def toTensor(img):
     assert type(img) == np.ndarray,'the img type is {}, but ndarry expected'.format(type(img))
     # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = torch.from_numpy(img.transpose((2, 0, 1)))
+    img = torch.from_numpy(img.transpose((2, 0, 1))) # 会保留uint8的数值范围
     return img.float().cuda().unsqueeze(0)  
+
+
+def ensure_cv2_image(img):
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu()
+        if img.dim() == 4:
+            img = img.squeeze(0)
+        if img.dim() == 3:
+            img = img.permute(1, 2, 0).contiguous().numpy()
+        else:
+            raise TypeError('unsupported tensor shape for image: {}'.format(tuple(img.shape)))
+    if not isinstance(img, np.ndarray):
+        raise TypeError('img must be numpy array or tensor, got {}'.format(type(img)))
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
 
 
 def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_800, img_cv2,img_path, fcos_model):
@@ -39,9 +55,11 @@ def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_8
     height = img_cv2.shape[2] 
     attack_map = np.zeros(img_cv2.shape[2:4])
     attack_map_mean = np.zeros(img_cv2.shape[2:4])
+    # 对应RGB的三个通道
     attack_map_mean = np.stack((attack_map_mean, attack_map_mean, attack_map_mean),axis=-1)
     divide_size=[1,2,3]
     size_divide = {0:[],1:[],2:[]}
+    # 根据box的面积将其分为三类：小于32*32的为小目标，32*32-96*96的为中目标，大于96*96的为大目标
     for i in range(len(boxes_init)):
         area = np.abs(boxes_init[i][2]-boxes_init[i][0])*np.abs(boxes_init[i][3]-boxes_init[i][1])
         if area<1024:
@@ -50,6 +68,7 @@ def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_8
             size_divide[1].append([boxes_init[i],pred_init[i],labels_init[i]])
         else:
             size_divide[2].append([boxes_init[i],pred_init[i],labels_init[i]])
+    
     for area_size,results in size_divide.items():
         if divide_size[area_size]==1:
             for box in results:
@@ -70,19 +89,24 @@ def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_8
                         same_class[result[2]].append(result)
                 divide_number = divide_size[area_size]
                 for class_name, same_class_box in same_class.items():
+                    # 建立矩阵存储每个区域的iou、预测分数和综合分数
                     all_iou = {i:np.zeros((divide_number,divide_number)) for i in range(len(same_class_box))}
                     all_pred = {i:np.zeros((divide_number,divide_number)) for i in range(len(same_class_box))}
                     all_score = {i:np.zeros((divide_number,divide_number)) for i in range(len(same_class_box))}
                     for i in range(divide_number):    
                         for j in range(divide_number):
                             same_class_pred = []
+                            # 创建深度副本
+                            # box[0]是坐标，box[1]是预测分数，box[2]是类别标签
                             img_mask = copy.deepcopy(img_cv2)
                             for box in same_class_box:
                                 x1,y1,x2,y2 = box[0][0],box[0][1],box[0][2],box[0][3]
                                 w = x2-x1
                                 h = y2-y1
+                                # 保留同一类别的预测分数
                                 same_class_pred.append(box[1])
                                 img_mn = region_img_mean(img_cv2,x1,y1,w,h,i,j,divide_number)
+                                # 
                                 img_mean = img_mn.view(1,3,1,1)
                                 img_mask[:,:,int(y1+j*h/divide_number):int(y1+(j+1)*h/divide_number),int(x1+i*w/divide_number):int(x1+(i+1)*w/divide_number)] = img_mean
                         
@@ -108,10 +132,9 @@ def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_8
     attack_map = np.stack((attack_map, attack_map, attack_map),axis=-1)       
     return attack_map,attack_map_mean
 
+# 从faster的结果txt中读取box和label
 def get_faster_result(img):
-    classes = ['airplane','airport','baseballfield','basketballcourt','bridge','chimney','dam',
-    'Expressway-Service-area','Expressway-toll-station','golffield',
-    'groundtrackfield','harbor','overpass','ship','stadium','storagetank','tenniscourt','trainstation','vehicle','windmill']
+    classes = ['ship']
     results_path='/disk1/peileipl/programs/mmdetection/results/faster_res50_800/results'
     img_txt=img.split('.')[0]+'.txt'
     results=os.path.join(results_path,img_txt)
@@ -128,11 +151,13 @@ def get_faster_result(img):
     labels_out=np.array(labels,dtype=np.int32)
     init_det=torch.tensor(boxes_out,dtype=torch.float32).cuda()
     return boxes_out , labels_out,init_det
-    
+
+# 根据mask图像的结果变化来计算iou、预测分数和综合分数  
 def mask_img_result_change(same_class_box,same_class_pred,class_name,boxes_mask , labels_mask):
     if class_name not in labels_mask:
         det_pre = np.ones((len(same_class_pred),),dtype=np.float32)
         max_iou = np.zeros((len(same_class_pred),),dtype=np.float32)
+        # 综合分数=1-IOU+预测分数变化
         det_score = 1-max_iou+det_pre
     else:  
         same_class_box_mask = boxes_mask[labels_mask==class_name]
@@ -180,7 +205,9 @@ def region_img_mean(img_cv2,x1,y1,w,h,i,j,divide_number):
     return mn
 
 def k_largest_index_argsort(a, k):
+    # 反向排序 从末尾取k个元素
     idx = np.argsort(a.ravel())[:-k-1:-1]
+    # 将一维索引转换为二维索引
     return np.column_stack(np.unravel_index(idx, a.shape))
 
 def parse_args():
@@ -193,7 +220,7 @@ def parse_args():
     parser.add_argument('--iters', type=int,
                         default=10)
     parser.add_argument('--save_name', type=str,
-                        default='dior_fcos')
+                        default='hrsc_fcos')
     parser.add_argument('--threshold', type=float,
                         default=0)
     args = parser.parse_args()
@@ -204,7 +231,7 @@ def attack_imgs(root_path, imgs):
 
 
     ################# fcos init ###############
-    fcos_model = mmdetection_init_detector(config='./mmdetection/configs/fcos/fcos_r50_caffe_fpn_gn-head_4x4_1x_coco.py', checkpoint='./weight/dior/fcos_r50/epoch_12.pth', device='cuda:0')
+    fcos_model = mmdetection_init_detector(config='./mmdetection/configs/fcos/fcos_hrsc.py', checkpoint='/cloud/cloud-ssd1/collected_files/ljj/APs/TPA-main/mmdetection/weight/epoch_12.pth', device='cuda:0')
     ##################################################
 
     for ind in range(len(imgs)):
@@ -221,6 +248,7 @@ def attack_imgs(root_path, imgs):
         init_det = None
         epsilon = 16/255
 
+        # 调用模型 得到检测box和label
         fcos_boxes,labels_pred,_ = fcos_attack_init(img_path,fcos_model, img_cv2_800_800,  img_cv2)
         if fcos_boxes.size==0:
             continue
@@ -232,8 +260,8 @@ def attack_imgs(root_path, imgs):
                 clip_min = np.clip(original_img - adversarial_degree, 0, 255)
                 clip_max = np.clip(original_img + adversarial_degree, 0, 255)
             mask_layer=np.zeros(original_img.shape[:2])
-            boxes , labels,init_det= get_faster_result(imgs[ind])
-            # boxes , labels,init_det = fcos_attack_init(img_path, fcos_model, img_cv2_800_800, img_cv2)
+            # boxes , labels,init_det= get_faster_result(imgs[ind])
+            boxes , labels,init_det = fcos_attack_init(img_path, fcos_model, img_cv2_800_800, img_cv2)
             ori_bbox_num = len(boxes)
             boxes_init,pred_init,labels_init = [],[],[]
             for i in range(len(labels)):
@@ -251,7 +279,7 @@ def attack_imgs(root_path, imgs):
             if attack_iter != 0:
                 if not os.path.exists('./results/{}/iter'.format(args.save_name)):
                     os.makedirs('./results/{}/iter'.format(args.save_name))
-                cv2.imwrite(os.path.join('./results/{}/iter'.format(args.save_name), imgs[ind]), img_cv2)
+                cv2.imwrite(os.path.join('./results/{}/iter'.format(args.save_name), imgs[ind]), ensure_cv2_image(img_cv2))
                 img_cv2 = toTensor(img_cv2).cuda()
                 img_cv2.requires_grad=True
                 img_cv2_800_800 = img_cv2
@@ -281,6 +309,11 @@ def attack_imgs(root_path, imgs):
             img_cv2 = copy.deepcopy(img)
         
         ############## 保存结束 ###############
+        # 保存最终攻击图片
+        if not os.path.exists('./results/{}/iter'.format(args.save_name)):
+            os.makedirs('./results/{}/iter'.format(args.save_name))
+        cv2.imwrite(os.path.join('./results/{}/iter'.format(args.save_name), imgs[ind]), ensure_cv2_image(img_cv2))
+
         save_dir = './results_txt/{}'.format(args.save_name)
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
@@ -302,6 +335,6 @@ def attack_imgs(root_path, imgs):
 if __name__ == '__main__':
     torch.backends.cudnn.deterministic = True
     args = parse_args()
-    root_path = './images/dior/images/'
+    root_path = '/cloud/cloud-ssd1/collected_files/ljj/dataset/HRSC-coco/val'
     imgs = os.listdir(root_path)
     attack_imgs(root_path, imgs)

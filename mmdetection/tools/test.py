@@ -56,6 +56,12 @@ def parse_args():
     parser.add_argument(
         '--options', nargs='+', action=DictAction, help='arguments in dict')
     parser.add_argument(
+        '--cfg-options',
+        nargs='+',
+        action=DictAction,
+        help='override settings in the used config, the key-value pair '
+        'in xxx=yyy format will be merged into config file')
+    parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
@@ -83,6 +89,25 @@ def main():
         raise ValueError('The output file must be a pkl file.')
 
     cfg = Config.fromfile(args.config)
+    if args.cfg_options is not None:
+        cfg.merge_from_dict(args.cfg_options)
+
+    # Backward-compat: allow legacy usage like
+    # --options data.test.img_prefix=... for config override.
+    eval_kwargs = {}
+    legacy_cfg_options = {}
+    if args.options is not None:
+        for key, value in args.options.items():
+            top_key = key.split('.')[0]
+            if '.' in key and top_key in cfg:
+                legacy_cfg_options[key] = value
+            else:
+                eval_kwargs[key] = value
+    if legacy_cfg_options:
+        print('Detected config-style keys in --options. '
+              'Merging into config for backward compatibility. '
+              'Prefer using --cfg-options in future runs.')
+        cfg.merge_from_dict(legacy_cfg_options)
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
@@ -142,11 +167,10 @@ def main():
         if args.out:
             print(f'\nwriting results to {args.out}')
             mmcv.dump(outputs, args.out)
-        kwargs = {} if args.options is None else args.options
         if args.format_only:
-            dataset.format_results(outputs, **kwargs)
+            dataset.format_results(outputs, **eval_kwargs)
         if args.eval:
-            dataset.evaluate(outputs, args.eval, **kwargs)
+            dataset.evaluate(outputs, args.eval, **eval_kwargs)
 
 
 if __name__ == '__main__':
