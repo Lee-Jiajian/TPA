@@ -1,5 +1,5 @@
 dataset_type = 'DIORDataset'
-data_root = '/disk2/lhd/datasets/attack/dior/'
+data_root = '/cloud/cloud-ssd1/collected_files/ljj/dataset/DIOR/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 train_pipeline = [
@@ -32,17 +32,17 @@ data = dict(
     workers_per_gpu=2,
     train=dict(
         type=dataset_type,
-        ann_file=data_root + 'trainval/trainval.json',
-        img_prefix=data_root + 'trainval/images/',
+        ann_file=data_root + 'annotations/trainval.json',
+        img_prefix=data_root + 'JPEGImages-trainval/',
         pipeline=train_pipeline),
     val=dict(
         type=dataset_type,
-        ann_file=data_root + 'select/select.json',
-        img_prefix=data_root + 'select/images/',
+        ann_file=data_root + 'annotations/trainval.json',
+        img_prefix=data_root + 'JPEGImages-trainval/',
         pipeline=test_pipeline),
     test=dict(
         type=dataset_type,
-        ann_file = data_root + 'select.json',
-        img_prefix='/disk2/lhd/codes/TPA/results/dior_fcos/iter',
+        ann_file = data_root + 'annotations/test.json',
+        img_prefix=data_root + 'JPEGImages-test/',
         pipeline=test_pipeline))
 evaluation = dict(interval=12, metric='bbox')

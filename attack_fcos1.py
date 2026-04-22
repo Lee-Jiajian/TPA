@@ -50,6 +50,27 @@ def ensure_cv2_image(img):
     return img
 
 
+def make_mask_preview(mask):
+    mask_u8 = (np.clip(mask, 0.0, 1.0) * 255.0).astype(np.uint8)
+    preview = np.zeros((mask_u8.shape[0], mask_u8.shape[1], 3), dtype=np.uint8)
+    preview[mask_u8 > 0] = (0, 0, 255)
+    return preview
+
+
+def make_perturb_preview(img_init, img_adv):
+    diff = np.abs(img_adv.astype(np.int16) - img_init.astype(np.int16)).astype(np.uint8)
+    diff_gray = np.max(diff, axis=2)
+    heat = cv2.applyColorMap(np.clip(diff_gray * 25, 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+    return heat
+
+
+def make_overlay_preview(img_init, img_adv, alpha=0.6):
+    img_init_u8 = ensure_cv2_image(img_init)
+    img_adv_u8 = ensure_cv2_image(img_adv)
+    overlay = cv2.addWeighted(img_init_u8, alpha, img_adv_u8, 1.0 - alpha, 0)
+    return overlay
+
+
 def make_init_mask_img(boxes_init,pred_init,labels_init,mask_layer,img_cv2_800_800, img_cv2,img_path, fcos_model):
     width = img_cv2.shape[3] 
     height = img_cv2.shape[2] 
@@ -224,11 +245,11 @@ def parse_args():
     parser.add_argument('--threshold', type=float,
                         default=0)
     parser.add_argument('--config', type=str,
-                        default='./mmdetection/configs/fcos/fcos_r50_caffe_fpn_gn-head_4x4_1x_coco.py')
+                        default='./mmdetection/configs/fcos/fcos_hrsc.py')
     parser.add_argument('--checkpoint', type=str,
-                        default='./mmdetection/work_dirs/fcos_r50_dior12/epoch_12.pth')
+                        default='./mmdetection/weight/epoch_12.pth')
     parser.add_argument('--data_root', type=str,
-                        default='/cloud/cloud-ssd1/collected_files/ljj/dataset/DIOR/JPEGImages-test/')
+                        default='/cloud/cloud-ssd1/collected_files/ljj/dataset/HRSC-coco/val/')
     parser.add_argument('--device', type=str,
                         default='cuda:0')
     parser.add_argument('--save_iter_images', action='store_true',
@@ -254,14 +275,17 @@ def attack_imgs(root_path, imgs):
 
     # Prepare output paths once to avoid repeated filesystem checks in hot loops.
     save_iter_dir = './results/{}/iter'.format(args.save_name)
+    save_vis_dir = './results/{}/1'.format(args.save_name)
     save_txt_dir = './results_txt/{}'.format(args.save_name)
     os.makedirs(save_iter_dir, exist_ok=True)
+    os.makedirs(save_vis_dir, exist_ok=True)
     os.makedirs(save_txt_dir, exist_ok=True)
     save_perts = os.path.join(save_txt_dir, 'result_{}.txt'.format(args.image_batch))
 
     for ind in range(len(imgs)):
         fcos_model.zero_grad()
         img_path = os.path.join(root_path, imgs[ind])
+        img_init = cv2.imread(img_path)
         original_img = None
         adversarial_degree = 255.
         ori_bbox_num = None
@@ -280,7 +304,7 @@ def attack_imgs(root_path, imgs):
         with torch.no_grad():
             ##########寻找攻击区域############
             if original_img is None:
-                original_img = cv2.imread(img_path)
+                original_img = img_init
                 original_img = np.array(original_img, dtype = np.int16)
                 clip_min = np.clip(original_img - adversarial_degree, 0, 255)
                 clip_max = np.clip(original_img + adversarial_degree, 0, 255)
@@ -309,7 +333,7 @@ def attack_imgs(root_path, imgs):
                 img_cv2_800_800 = img_cv2
         
             if original_img is None:
-                original_img = cv2.imread(img_path)
+                original_img = img_init
                 original_img = np.array(original_img, dtype = np.int16)
                 clip_min = np.clip(original_img - adversarial_degree, 0, 255)
                 clip_max = np.clip(original_img + adversarial_degree, 0, 255)      
@@ -337,12 +361,19 @@ def attack_imgs(root_path, imgs):
         if not args.no_save_final_images:
             cv2.imwrite(os.path.join(save_iter_dir, imgs[ind]), ensure_cv2_image(img_cv2))
 
-        img_init = cv2.imread(os.path.join(root_path, imgs[ind])).astype(np.float32)
-        img_adv = ensure_cv2_image(img_cv2).astype(np.float32)
-        pp = (img_adv - img_init) / 255
+        img_adv = ensure_cv2_image(img_cv2)
+        img_init = img_init.astype(np.float32)
+        pp = (img_adv.astype(np.float32) - img_init) / 255
         pp_L2=np.sum((pp) ** 2) ** .5
         pp_Lp=np.max(np.abs(pp))
         pp_L0=pp[pp!=0].size/img_init.size
+
+        mask_preview = make_mask_preview(attack_map[..., 0])
+        perturb_preview = make_perturb_preview(img_init.astype(np.uint8), img_adv)
+        overlay_preview = make_overlay_preview(img_init.astype(np.uint8), img_adv)
+        cv2.imwrite(os.path.join(save_vis_dir, imgs[ind].rsplit('.', 1)[0] + '_mask.png'), mask_preview)
+        cv2.imwrite(os.path.join(save_vis_dir, imgs[ind].rsplit('.', 1)[0] + '_perturb.png'), perturb_preview)
+        cv2.imwrite(os.path.join(save_vis_dir, imgs[ind].rsplit('.', 1)[0] + '_overlay.png'), overlay_preview)
 
         with open(save_perts,'a') as f:
             f.write(str(ind)+' '+imgs[ind]+' '+'L2'+' '+str(pp_L2)+' '+'Linf'+' '+str(pp_Lp)+' '+
@@ -355,7 +386,8 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = args.deterministic
     torch.backends.cudnn.benchmark = not args.deterministic
     root_path = args.data_root
-    imgs = os.listdir(root_path)
+    # Keep a stable order so chunked runs (start_idx/end_idx) are reproducible.
+    imgs = sorted(os.listdir(root_path))
     start_idx = max(args.start_idx, 0)
     end_idx = len(imgs) if args.end_idx < 0 else min(args.end_idx, len(imgs))
     imgs = imgs[start_idx:end_idx]

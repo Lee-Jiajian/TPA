@@ -24,10 +24,72 @@ DIOR_CLASSES = (
 IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
 CLASS2ID = dict((name, idx + 1) for idx, name in enumerate(DIOR_CLASSES))
 
+ANN_SUBDIR_CANDIDATES = (
+    'Annotations/Horizontal Bounding Boxes',
+    'Annotations',
+    'Horizontal Bounding Boxes',
+    'Oriented Bounding Boxes',
+)
+
 
 def _read_split_list(split_file):
     with open(split_file, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
+
+
+def _resolve_default_splits(root_dir):
+    """Resolve default split files for DIOR.
+
+    Priority:
+    1) Use ImageSets/Main/trainval.txt + test.txt if present.
+    2) Otherwise merge train.txt + val.txt as trainval, and use test.txt.
+    """
+    main_dir = osp.join(root_dir, 'ImageSets', 'Main')
+    trainval_file = osp.join(main_dir, 'trainval.txt')
+    test_file = osp.join(main_dir, 'test.txt')
+
+    if osp.isfile(trainval_file) and osp.isfile(test_file):
+        return [
+            ('trainval', trainval_file, 'JPEGImages-trainval', osp.join(root_dir, 'annotations', 'trainval.json')),
+            ('test', test_file, 'JPEGImages-test', osp.join(root_dir, 'annotations', 'test.json')),
+        ]
+
+    train_file = osp.join(main_dir, 'train.txt')
+    val_file = osp.join(main_dir, 'val.txt')
+    if osp.isfile(train_file) and osp.isfile(val_file) and osp.isfile(test_file):
+        train_ids = _read_split_list(train_file)
+        val_ids = _read_split_list(val_file)
+        merged = []
+        seen = set()
+        for stem in train_ids + val_ids:
+            if stem not in seen:
+                merged.append(stem)
+                seen.add(stem)
+        return [
+            ('trainval', merged, 'JPEGImages-trainval', osp.join(root_dir, 'annotations', 'trainval.json')),
+            ('test', test_file, 'JPEGImages-test', osp.join(root_dir, 'annotations', 'test.json')),
+        ]
+
+    raise FileNotFoundError(
+        'Cannot find valid split files under ImageSets/Main. '
+        'Expected either trainval.txt+test.txt, or train.txt+val.txt+test.txt.')
+
+
+def _resolve_xml_dir(root_dir, ann_subdir=None):
+    if ann_subdir:
+        candidate = osp.join(root_dir, ann_subdir)
+        if osp.isdir(candidate):
+            return candidate
+        raise FileNotFoundError('Annotation directory not found: {}'.format(candidate))
+
+    for rel in ANN_SUBDIR_CANDIDATES:
+        candidate = osp.join(root_dir, rel)
+        if osp.isdir(candidate):
+            print('Using annotation directory: {}'.format(candidate))
+            return candidate
+
+    raise FileNotFoundError(
+        'Cannot find annotation XML directory. Tried: {}'.format(', '.join(ANN_SUBDIR_CANDIDATES)))
 
 
 def _find_image_name(images_dir, stem):
@@ -108,16 +170,17 @@ def _parse_xml(xml_path, image_id, file_name):
     return image_info, annotations
 
 
-def _convert_split(root_dir, split_name, list_file, images_dir, out_file):
-    if not osp.isfile(list_file):
-        raise FileNotFoundError('Split list not found: {}'.format(list_file))
-
-    img_stems = _read_split_list(list_file)
+def _convert_split(root_dir, split_name, list_file, images_dir, out_file, xml_dir):
+    if isinstance(list_file, list):
+        img_stems = list_file
+    else:
+        if not osp.isfile(list_file):
+            raise FileNotFoundError('Split list not found: {}'.format(list_file))
+        img_stems = _read_split_list(list_file)
     images = []
     annotations = []
     ann_id = 1
 
-    xml_dir = osp.join(root_dir, 'Annotations')
     for image_id, stem in enumerate(img_stems, start=1):
         xml_path = osp.join(xml_dir, stem + '.xml')
         if not osp.isfile(xml_path):
@@ -146,6 +209,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Convert DIOR VOC annotations to COCO JSON')
     parser.add_argument('root_dir', help='Root directory of the raw DIOR dataset')
     parser.add_argument(
+        '--ann-subdir',
+        default='',
+        help=('Relative annotation subdir containing XML files. '
+              'Examples: "Annotations/Horizontal Bounding Boxes" or "Annotations". '
+              'If omitted, the script auto-detects common DIOR layouts.'))
+    parser.add_argument(
         '--split',
         action='append',
         default=[],
@@ -158,27 +227,35 @@ def parse_args():
 def main():
     args = parse_args()
     root_dir = osp.abspath(args.root_dir)
+    xml_dir = _resolve_xml_dir(root_dir, args.ann_subdir.strip() or None)
 
-    default_splits = [
-        ('trainval', 'ImageSets/Main/trainval.txt', 'JPEGImages-trainval', 'annotations/trainval.json'),
-        ('test', 'ImageSets/Main/test.txt', 'JPEGImages-test', 'annotations/test.json'),
-    ]
-    split_specs = args.split or [':'.join(spec) for spec in default_splits]
+    if args.split:
+        for spec in args.split:
+            parts = spec.split(':')
+            if len(parts) != 4:
+                raise ValueError(
+                    'Split spec must be '
+                    'name:ImageSets/Main/list.txt:JPEGImages-dir:annotations/out.json, '
+                    'but got {}'.format(spec))
+            name, list_rel, img_dir_rel, out_rel = parts
+            _convert_split(
+                root_dir=root_dir,
+                split_name=name,
+                list_file=osp.join(root_dir, list_rel),
+                images_dir=osp.join(root_dir, img_dir_rel),
+                out_file=osp.join(root_dir, out_rel),
+                xml_dir=xml_dir,
+            )
+        return
 
-    for spec in split_specs:
-        parts = spec.split(':')
-        if len(parts) != 4:
-            raise ValueError(
-                'Split spec must be '
-                'name:ImageSets/Main/list.txt:JPEGImages-dir:annotations/out.json, '
-                'but got {}'.format(spec))
-        name, list_rel, img_dir_rel, out_rel = parts
+    for name, split_input, img_dir_rel, out_file in _resolve_default_splits(root_dir):
         _convert_split(
             root_dir=root_dir,
             split_name=name,
-            list_file=osp.join(root_dir, list_rel),
+            list_file=split_input,
             images_dir=osp.join(root_dir, img_dir_rel),
-            out_file=osp.join(root_dir, out_rel),
+            out_file=out_file,
+            xml_dir=xml_dir,
         )
 
 

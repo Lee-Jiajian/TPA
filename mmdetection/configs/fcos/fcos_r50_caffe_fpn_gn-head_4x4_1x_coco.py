@@ -2,6 +2,9 @@ _base_ = [
     '../_base_/datasets/dior_detection.py',
     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
 ]
+# Keep this local alias because this file directly references data_root
+# when overriding val/test split paths.
+data_root = '/cloud/cloud-ssd1/collected_files/ljj/dataset/DIOR/'
 # model settings
 model = dict(
     type='FCOS',
@@ -88,13 +91,20 @@ data = dict(
     samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(pipeline=train_pipeline),
-    val=dict(pipeline=test_pipeline),
+    # Validate on held-out test split instead of trainval to monitor generalization.
+    val=dict(
+        ann_file=data_root + 'annotations/test.json',
+        img_prefix=data_root + 'JPEGImages-test/',
+        pipeline=test_pipeline),
     test=dict(pipeline=test_pipeline))
 # optimizer
 optimizer = dict(
-    lr=0.01, paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
+    # Current runs are single-GPU (global batch=4). Use linear LR scaling from 0.01@16.
+    lr=0.0025, paramwise_cfg=dict(bias_lr_mult=2., bias_decay_mult=0.))
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
+# This mmdet/mmcv version expects a numeric loss_scale in Fp16OptimizerHook.
+fp16 = dict(loss_scale=512.)
 # learning policy
 lr_config = dict(
     policy='step',
@@ -103,3 +113,9 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     step=[8, 11])
 total_epochs = 12
+
+# Use FCOS COCO pretrained detector weights for better head initialization.
+load_from = 'checkpoints/fcos_r50_caffe_fpn_gn-head_1x_coco-821213aa.pth'
+
+# Run evaluation only at the end for faster turnaround.
+evaluation = dict(interval=12, metric='bbox')
